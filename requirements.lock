@@ -95,8 +95,6 @@ pip==25.2
     # via ta-lib
 platformdirs==4.3.8
     # via jupyter-core
-polars==1.32.2
-    # via sbt
 prompt-toolkit==3.0.51
     # via ipython
 psutil==7.0.0
