@@ -6,11 +6,8 @@ from loguru import logger
 from dotenv import load_dotenv
 import pandas as pd
 
-try:
-    from backtesting import Backtest
-except Exception as e:
-    logger.error(f"无法导入 backtesting 库：{e}")
-    Backtest = None
+# 自研回测引擎
+from sbt.backtest import BacktestEngine, StrategyBase
 
 
 @click.group(help="回测相关命令")
@@ -40,13 +37,10 @@ def load_strategy_class(strategy_name: str, strategy_dir: str):
     if hasattr(module, strategy_name):
         return getattr(module, strategy_name)
     else:
-        # 如果没有同名类，查找继承自 Strategy 的类
-        from backtesting import Strategy
+        # 在模块中查找继承自 StrategyBase 的类
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
-            if (isinstance(attr, type) and 
-                issubclass(attr, Strategy) and 
-                attr != Strategy):
+            if isinstance(attr, type) and issubclass(attr, StrategyBase) and attr is not StrategyBase:
                 return attr
         raise AttributeError(f"在 {strategy_file} 中找不到有效的策略类")
 
@@ -61,7 +55,7 @@ def load_data(code: str, period: str, start_date: str, end_date: str, data_dir: 
     
     df = pd.read_parquet(fpath)
     
-    # 转换为 backtesting 需要的格式
+    # 转换为自研引擎需要的格式
     # 需要列名: Open, High, Low, Close, Volume
     df_bt = pd.DataFrame()
     
@@ -70,7 +64,7 @@ def load_data(code: str, period: str, start_date: str, end_date: str, data_dir: 
         df['datetime'] = pd.to_datetime(df['time'], unit='ms')
         df.set_index('datetime', inplace=True)
     
-    # 重命名列以符合 backtesting 要求
+    # 重命名列以符合自研引擎要求
     column_mapping = {
         'open': 'Open',
         'high': 'High', 
@@ -111,9 +105,6 @@ def load_data(code: str, period: str, start_date: str, end_date: str, data_dir: 
 @click.option("--verbose/--no-verbose", default=True, show_default=True, help="是否打印详细日志")
 def run_backtest(code_list: str, start_date: str, end_date: str, period: str, strategy: str, cash: float, commission: float, verbose: bool):
     """运行回测"""
-    if Backtest is None:
-        click.echo("backtesting 库未就绪，无法运行回测。", err=True)
-        sys.exit(1)
     
     # 读取.env配置
     load_dotenv()
@@ -183,8 +174,15 @@ def run_backtest(code_list: str, start_date: str, end_date: str, period: str, st
             logger.info(f"{code} 数据加载完成，数据量: {len(df)}")
             
             # 运行回测
-            bt = Backtest(df, strategy_class, cash=cash, commission=commission)
+            logger.info(f"数据索引类型: {type(df.index)}")
+            logger.info(f"数据形状: {df.shape}")
+            logger.info(f"列名: {df.columns.tolist()}")
+            
+            bt = BacktestEngine(df, strategy_class, cash=cash, commission=commission)
+            logger.info("回测引擎创建成功")
+            
             result = bt.run()
+            logger.info("回测运行完成")
             
             results[code] = result
             
@@ -196,15 +194,21 @@ def run_backtest(code_list: str, start_date: str, end_date: str, period: str, st
             logger.info(f"  夏普比率: {result.get('Sharpe Ratio', 'N/A')}")
             logger.info(f"  交易次数: {result.get('# Trades', 'N/A')}")
             
-            # 保存结果图表（如果有的话）
+            # 保存结果图表
             try:
+                logger.info(f"交易数量: {len(bt.strategy.trades)}")
+                logger.info(f"权益曲线长度: {len(bt.strategy.equity_curve)}")
+                
                 output_dir = os.path.join(data_dir, "backtest_results")
                 os.makedirs(output_dir, exist_ok=True)
                 chart_path = os.path.join(output_dir, f"{code}_{strategy}_{period}_{start_date}_{end_date}.html")
-                bt.plot(filename=chart_path)
+                _ = bt.plot(filename=chart_path, show_in_browser=True)
                 logger.info(f"  图表已保存: {chart_path}")
+                logger.info("  已在浏览器中打开图表")
             except Exception as e:
                 logger.warning(f"保存图表失败: {e}")
+                import traceback
+                logger.warning(traceback.format_exc())
                 
         except Exception as e:
             logger.error(f"{code} 回测失败: {e}")
