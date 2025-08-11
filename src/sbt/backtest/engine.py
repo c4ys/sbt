@@ -51,6 +51,112 @@ class BacktestEngine:
             ),
         )
 
+        # 1) K线图 - 参考 backtesting.py 的 OHLC 实现
+        p_ohlc = figure(
+            title="K线图",
+            x_axis_type="linear",
+            height=400,
+            width=1200,
+            sizing_mode="stretch_width",
+            x_range=x_range,
+            tools=tools,
+            toolbar_location=None,
+        )
+        
+        # 为K线图添加悬停工具
+        ohlc_hover = HoverTool(
+            tooltips=[
+                ("时间", "@datetime{%F %T}"),
+                ("开盘", "@Open{0,0.00}"),
+                ("最高", "@High{0,0.00}"),
+                ("最低", "@Low{0,0.00}"),
+                ("收盘", "@Close{0,0.00}"),
+                ("成交量", "@Volume{0,0}")
+            ],
+            formatters={'@datetime': 'datetime'},
+            mode='vline'
+        )
+        p_ohlc.add_tools(ohlc_hover)
+        p_ohlc.add_tools(linked_crosshair)
+        
+        # 绘制K线 - 使用连续的时间轴
+        w = 0.8
+        
+        # 为每根K线添加颜色和形状信息到数据源
+        df_plot = df.copy()
+        df_plot['color'] = ['red' if close > open else 'green' for close, open in zip(df['Close'], df['Open'])]
+        df_plot['top'] = [max(close, open) for close, open in zip(df['Close'], df['Open'])]
+        df_plot['bottom'] = [min(close, open) for close, open in zip(df['Close'], df['Open'])]
+        
+        # 更新数据源包含新字段
+        source_ohlc = ColumnDataSource(data={
+            'index': list(range(len(df_plot))),
+            'datetime': df_plot.index.tolist(),
+            'Open': df_plot['Open'].tolist(),
+            'High': df_plot['High'].tolist(),
+            'Low': df_plot['Low'].tolist(),
+            'Close': df_plot['Close'].tolist(),
+            'Volume': df_plot['Volume'].tolist(),
+            'color': df_plot['color'].tolist(),
+            'top': df_plot['top'].tolist(),
+            'bottom': df_plot['bottom'].tolist(),
+        })
+        
+        # 绘制影线（高低线）- 使用连续的索引
+        p_ohlc.segment('index', 'High', 'index', 'Low', source=source_ohlc, color="black", line_width=1)
+        
+        # 绘制K线实体 - 使用单一数据源和颜色字段
+        p_ohlc.vbar(x='index', width=w, top='top', bottom='bottom', 
+                   source=source_ohlc, color='color', alpha=0.8, line_color="black")
+
+        # 添加买卖点标记 - 参考 backtesting.py 的交易标记
+        if hasattr(self.strategy, 'trades') and len(self.strategy.trades) > 0:
+            trades_df = pd.DataFrame(self.strategy.trades)
+            if not trades_df.empty:
+                # 买入点（绿色向上三角形）
+                buy_trades = trades_df[trades_df['side'] == 'buy'].copy()
+                if not buy_trades.empty:
+                    # 使用交易时的索引位置
+                    buy_trades['x'] = buy_trades['i']  # 使用策略记录的索引
+                    buy_trades['y'] = buy_trades['price']
+                    buy_source = ColumnDataSource(buy_trades)
+                    p_ohlc.scatter(x='x', y='y', source=buy_source, 
+                                  marker='triangle', size=12, color="green", alpha=0.8, 
+                                  legend_label="买入")
+                
+                # 卖出点（红色向下三角形）  
+                sell_trades = trades_df[trades_df['side'] == 'sell'].copy()
+                if not sell_trades.empty:
+                    # 使用交易时的索引位置
+                    sell_trades['x'] = sell_trades['i']  # 使用策略记录的索引
+                    sell_trades['y'] = sell_trades['price']
+                    sell_source = ColumnDataSource(sell_trades)
+                    p_ohlc.scatter(x='x', y='y', source=sell_source,
+                                  marker='inverted_triangle', size=12, color="red", alpha=0.8,
+                                  legend_label="卖出")
+        
+        # 设置K线图的图例位置
+        p_ohlc.legend.location = "top_left"
+        p_ohlc.legend.click_policy = "hide"
+        
+        # 为K线图添加时间格式化
+        p_ohlc.xaxis.formatter = CustomJSTickFormatter(
+            args=dict(source=source_ohlc),
+            code="""
+            const idx = Math.round(tick);
+            const dts = source.data.datetime;
+            if (idx >= 0 && idx < dts.length) {
+                const dt = new Date(dts[idx]);
+                const mm = String(dt.getMonth()+1).padStart(2,'0');
+                const dd = String(dt.getDate()).padStart(2,'0');
+                const hh = String(dt.getHours()).padStart(2,'0');
+                const mi = String(dt.getMinutes()).padStart(2,'0');
+                return `${mm}/${dd} ${hh}:${mi}`;
+            }
+            return '';
+            """
+        )
+
         # 2) 成交量图
         p_volume = figure(
             title="成交量",
@@ -219,7 +325,7 @@ class BacktestEngine:
         )
 
         # 布局与输出 - 使用 gridplot 而不是 column 以避免显示问题
-        figs = [p_volume, p_equity]
+        figs = [p_ohlc, p_volume, p_equity]
         
         # 配置工具栏选项
         kwargs = {}
