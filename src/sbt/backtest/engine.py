@@ -2,7 +2,11 @@ from __future__ import annotations
 from typing import Type, Dict, Any
 import pandas as pd
 from bokeh.plotting import figure, output_file, save, show
-from bokeh.models import ColumnDataSource, Range1d, CustomJSTickFormatter, NumeralTickFormatter
+from bokeh.layouts import gridplot
+from bokeh.models import (
+    ColumnDataSource, Range1d, CustomJSTickFormatter, NumeralTickFormatter, 
+    HoverTool, Span, CrosshairTool
+)
 
 from .strategy import StrategyBase
 
@@ -33,7 +37,88 @@ class BacktestEngine:
         # 1) K线图：线性x轴，避免非交易时间的空隙
         pad = (n_bars - 1) / 20 if n_bars > 1 else 1
         x_range = Range1d(0, max(n_bars - 1, 1), min_interval=10, bounds=(-pad, max(n_bars - 1, 1) + pad))
+
+        # 通用工具配置（移除crosshair，我们将手动实现）
+        tools = "xpan,xwheel_zoom,xwheel_pan,box_zoom,reset"
         
+        # 参考 backtesting.py 的链接十字星实现
+        linked_crosshair = CrosshairTool(
+            dimensions='both', 
+            line_color='lightgrey',
+            overlay=(
+                Span(dimension="width", line_dash="dotted", line_width=1),
+                Span(dimension="height", line_dash="dotted", line_width=1)
+            ),
+        )
+
+        # 2) 成交量图
+        p_volume = figure(
+            title="成交量",
+            x_axis_type="linear",
+            height=120,
+            width=1200,
+            sizing_mode="stretch_width",
+            x_range=x_range,
+            tools=tools,
+            toolbar_location=None,  # 隐藏单个图表的工具栏
+        )
+        
+        # 为成交量图添加悬停工具
+        volume_hover = HoverTool(
+            tooltips=[
+                ("时间", "@datetime{%F %T}"),
+                ("开盘价", "@Open{0,0.00}"),
+                ("最高价", "@High{0,0.00}"),
+                ("最低价", "@Low{0,0.00}"),
+                ("收盘价", "@Close{0,0.00}"),
+                ("成交量", "@Volume{0,0}")
+            ],
+            formatters={'@datetime': 'datetime'},
+            mode='vline'
+        )
+        p_volume.add_tools(volume_hover)
+        
+        # 添加链接十字星工具
+        p_volume.add_tools(linked_crosshair)
+        
+        w = 0.8
+        inc = df['Close'] > df['Open']
+        dec = ~inc
+        inc_idx = [i for i in range(n_bars) if inc.iloc[i]]
+        dec_idx = [i for i in range(n_bars) if dec.iloc[i]]
+        
+        # 创建涨跌分组的数据源
+        if 'Volume' in df.columns:
+            if inc_idx:
+                inc_source = ColumnDataSource(data={
+                    'x': inc_idx,
+                    'top': df['Volume'].iloc[inc_idx].values,
+                    'datetime': df['datetime'].iloc[inc_idx],
+                    'Open': df['Open'].iloc[inc_idx],
+                    'High': df['High'].iloc[inc_idx],
+                    'Low': df['Low'].iloc[inc_idx],
+                    'Close': df['Close'].iloc[inc_idx],
+                    'Volume': df['Volume'].iloc[inc_idx]
+                })
+                p_volume.vbar(x='x', width=w, top='top', bottom=0, 
+                            color="green", alpha=0.7, source=inc_source)
+            
+            if dec_idx:
+                dec_source = ColumnDataSource(data={
+                    'x': dec_idx,
+                    'top': df['Volume'].iloc[dec_idx].values,
+                    'datetime': df['datetime'].iloc[dec_idx],
+                    'Open': df['Open'].iloc[dec_idx],
+                    'High': df['High'].iloc[dec_idx],
+                    'Low': df['Low'].iloc[dec_idx],
+                    'Close': df['Close'].iloc[dec_idx],
+                    'Volume': df['Volume'].iloc[dec_idx]
+                })
+                p_volume.vbar(x='x', width=w, top='top', bottom=0, 
+                            color="red", alpha=0.7, source=dec_source)
+        p_volume.yaxis.formatter = NumeralTickFormatter(format="0 a")
+        p_volume.xaxis.visible = False
+
         # 3) 资金曲线图
         p_equity = figure(
             title="资金曲线",
@@ -42,10 +127,40 @@ class BacktestEngine:
             width=1200,
             sizing_mode="stretch_width",
             x_range=x_range,
-            tools="xpan,xwheel_zoom,xwheel_pan,box_zoom,reset",
+            tools=tools,
+            toolbar_location=None,  # 隐藏单个图表的工具栏
         )
+        
+        # 为资金曲线创建数据源
         eq_idx = list(range(len(eq)))
-        p_equity.line(eq_idx, eq.values, color="navy", line_width=2, alpha=0.9, legend_label="资金曲线")
+        # 计算收益率
+        eq_returns = (eq / eq.iloc[0] - 1) * 100  # 转换为百分比
+        equity_source = ColumnDataSource(data={
+            'index': eq_idx,
+            'equity': eq.values,
+            'returns': eq_returns.values,
+            'datetime': eq.index[:len(eq_idx)]
+        })
+        
+        # 为资金曲线图添加悬停工具
+        equity_hover = HoverTool(
+            tooltips=[
+                ("时间", "@datetime{%F %T}"),
+                ("资金", "@equity{$ 0,0.00}"),
+                ("收益率", "@returns{+0.00}%"),
+                ("索引", "@index")
+            ],
+            formatters={'@datetime': 'datetime'},
+            mode='vline'
+        )
+        p_equity.add_tools(equity_hover)
+        
+        # 添加链接十字星工具
+        p_equity.add_tools(linked_crosshair)
+        
+        # 绘制资金曲线线条
+        p_equity.line('index', 'equity', source=equity_source, color="navy", 
+                     line_width=2, alpha=0.9, legend_label="资金曲线")
         if len(eq) > 1:
             # Max Drawdown
             rolling_max = eq.cummax()
@@ -103,8 +218,21 @@ class BacktestEngine:
             """
         )
 
-        # 布局与输出
-        layout = p_equity
+        # 布局与输出 - 使用 gridplot 而不是 column 以避免显示问题
+        figs = [p_volume, p_equity]
+        
+        # 配置工具栏选项
+        kwargs = {}
+        kwargs['sizing_mode'] = 'stretch_width'
+        
+        layout = gridplot(
+            figs,
+            ncols=1,
+            toolbar_location='right',
+            toolbar_options=dict(logo=None),
+            merge_tools=True,
+            **kwargs
+        )
         if filename is None:
             filename = "backtest_result.html"
         output_file(filename, title="回测结果")
