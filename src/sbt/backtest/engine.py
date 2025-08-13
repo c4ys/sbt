@@ -1,17 +1,16 @@
 from __future__ import annotations
 from typing import Type, Dict, Any
 import pandas as pd
-from bokeh.plotting import figure, output_file, save, show
-from bokeh.layouts import gridplot
-from bokeh.models import (
-    ColumnDataSource, Range1d, CustomJSTickFormatter, NumeralTickFormatter, 
-    HoverTool, Span, CrosshairTool
-)
+from pyecharts import options as opts
+from pyecharts.charts import Kline, Line, Bar, Grid
+from pyecharts.globals import ThemeType
+import webbrowser
+import os
 
 from .strategy import StrategyBase
 
 class BacktestEngine:
-    def __init__(self, data: pd.DataFrame, strategy_cls: Type[StrategyBase], cash: float = 10000.0, commission: float = 0.002):
+    def __init__(self, data: pd.DataFrame, strategy_cls: Type[StrategyBase], cash: float = 1000000.0, commission: float = 0.002):
         self.data = data
         self.strategy = strategy_cls(data, cash=cash, commission=commission)
 
@@ -24,326 +23,297 @@ class BacktestEngine:
         if len(self.strategy.equity_curve) == 0:
             raise ValueError("没有权益曲线数据，请先运行回测")
 
-        # 资金曲线序列（用于第三幅图）
+        # 准备数据
+        df = self.data.copy()
+        df['datetime'] = df.index.strftime('%Y-%m-%d %H:%M:%S')
+        x_data = df['datetime'].tolist()
+        ohlc_data = df[['Open', 'Close', 'Low', 'High']].values.tolist()
+        volume_data = df['Volume'].values.tolist()
         eq = pd.Series(self.strategy.equity_curve, index=self.data.index[:len(self.strategy.equity_curve)])
 
-        # 准备数据源：保存原始时间戳，使用线性索引驱动坐标轴
-        df = self.data.copy()
-        df = df.assign(datetime=df.index)
-        df = df.reset_index(drop=True)
-        n_bars = len(df)
-        source = ColumnDataSource(df)
-
-        # 1) K线图：线性x轴，避免非交易时间的空隙
-        pad = (n_bars - 1) / 20 if n_bars > 1 else 1
-        x_range = Range1d(0, max(n_bars - 1, 1), min_interval=10, bounds=(-pad, max(n_bars - 1, 1) + pad))
-
-        # 通用工具配置（移除crosshair，我们将手动实现）
-        tools = "xpan,xwheel_zoom,xwheel_pan,box_zoom,reset"
-        
-        # 参考 backtesting.py 的链接十字星实现
-        linked_crosshair = CrosshairTool(
-            dimensions='both', 
-            line_color='lightgrey',
-            overlay=(
-                Span(dimension="width", line_dash="dotted", line_width=1),
-                Span(dimension="height", line_dash="dotted", line_width=1)
-            ),
+        # 1) 资金曲线图
+        equity_line = (
+            Line()
+            .add_xaxis(x_data)
+            .add_yaxis(
+                "资金曲线",
+                eq.round(2).tolist(),
+                is_smooth=True,
+                linestyle_opts=opts.LineStyleOpts(width=2),
+                label_opts=opts.LabelOpts(is_show=False),
+            )
+            .set_global_opts(
+                title_opts=opts.TitleOpts(title="资金曲线", pos_left="5%", pos_top="1%", title_textstyle_opts=opts.TextStyleOpts(color="#000", font_size=12)),
+                xaxis_opts=opts.AxisOpts(
+                    type_="category",
+                    is_scale=True,
+                    axisline_opts=opts.AxisLineOpts(is_on_zero=False),
+                    splitline_opts=opts.SplitLineOpts(is_show=False),
+                    axislabel_opts=opts.LabelOpts(is_show=False),
+                ),
+                yaxis_opts=opts.AxisOpts(
+                    is_scale=True,
+                    splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(opacity=0.3)),
+                ),
+                datazoom_opts=[
+                    opts.DataZoomOpts(
+                        type_="inside",
+                        xaxis_index=[0, 1, 2],
+                        range_start=0,
+                        range_end=100,
+                    ),
+                    opts.DataZoomOpts(
+                        type_="slider",
+                        xaxis_index=[0, 1, 2],
+                        pos_bottom="0%",
+                        range_start=0,
+                        range_end=100,
+                    ),
+                ],
+                tooltip_opts=opts.TooltipOpts(
+                    trigger="axis",
+                    axis_pointer_type="cross",
+                    background_color="rgba(245, 245, 245, 0.8)",
+                    border_width=1,
+                    border_color="#ccc",
+                    textstyle_opts=opts.TextStyleOpts(color="#000"),
+                ),
+                axispointer_opts=opts.AxisPointerOpts(
+                    is_show=True,
+                    link=[{"xAxisIndex": "all"}],
+                    label=opts.LabelOpts(background_color="#777"),
+                ),
+            )
         )
 
-        # 1) K线图 - 参考 backtesting.py 的 OHLC 实现
-        p_ohlc = figure(
-            title="K线图",
-            x_axis_type="linear",
-            height=400,
-            width=1200,
-            sizing_mode="stretch_width",
-            x_range=x_range,
-            tools=tools,
-            toolbar_location=None,
-        )
-        
-        # 为K线图添加悬停工具
-        ohlc_hover = HoverTool(
-            tooltips=[
-                ("时间", "@datetime{%F %T}"),
-                ("开盘", "@Open{0,0.00}"),
-                ("最高", "@High{0,0.00}"),
-                ("最低", "@Low{0,0.00}"),
-                ("收盘", "@Close{0,0.00}"),
-                ("成交量", "@Volume{0,0}")
-            ],
-            formatters={'@datetime': 'datetime'},
-            mode='vline'
-        )
-        p_ohlc.add_tools(ohlc_hover)
-        p_ohlc.add_tools(linked_crosshair)
-        
-        # 绘制K线 - 使用连续的时间轴
-        w = 0.8
-        
-        # 为每根K线添加颜色和形状信息到数据源
-        df_plot = df.copy()
-        df_plot['color'] = ['red' if close > open else 'green' for close, open in zip(df['Close'], df['Open'])]
-        df_plot['top'] = [max(close, open) for close, open in zip(df['Close'], df['Open'])]
-        df_plot['bottom'] = [min(close, open) for close, open in zip(df['Close'], df['Open'])]
-        
-        # 更新数据源包含新字段
-        source_ohlc = ColumnDataSource(data={
-            'index': list(range(len(df_plot))),
-            'datetime': df_plot.index.tolist(),
-            'Open': df_plot['Open'].tolist(),
-            'High': df_plot['High'].tolist(),
-            'Low': df_plot['Low'].tolist(),
-            'Close': df_plot['Close'].tolist(),
-            'Volume': df_plot['Volume'].tolist(),
-            'color': df_plot['color'].tolist(),
-            'top': df_plot['top'].tolist(),
-            'bottom': df_plot['bottom'].tolist(),
-        })
-        
-        # 绘制影线（高低线）- 使用连续的索引
-        p_ohlc.segment('index', 'High', 'index', 'Low', source=source_ohlc, color="black", line_width=1)
-        
-        # 绘制K线实体 - 使用单一数据源和颜色字段
-        p_ohlc.vbar(x='index', width=w, top='top', bottom='bottom', 
-                   source=source_ohlc, color='color', alpha=0.8, line_color="black")
+        # 添加资金曲线的标记点
+        equity_mark_points = []
+        if len(eq) > 1:
+            start_equity = eq.iloc[0]
+            # Max Drawdown
+            rolling_max = eq.cummax()
+            drawdown = (eq / rolling_max - 1)
+            max_dd_idx = drawdown.idxmin()
+            max_dd_val = drawdown.min()
+            max_dd_time = max_dd_idx.strftime('%Y-%m-%d %H:%M:%S')
+            max_dd_equity = eq.loc[max_dd_idx]
+            equity_mark_points.append(
+                opts.MarkPointItem(
+                    coord=[max_dd_time, max_dd_equity],
+                    value=f"最大回撤: {max_dd_val:.2%}",
+                    itemstyle_opts=opts.ItemStyleOpts(color="red"),
+                    symbol_size=16
+                )
+            )
+            # Peak value
+            peak_val = eq.max()
+            peak_percentage = (peak_val / start_equity) * 100  # 转换为以初始资金为100%的百分比
+            peak_idx = eq.idxmax()
+            peak_time = peak_idx.strftime('%Y-%m-%d %H:%M:%S')
+            equity_mark_points.append(
+                opts.MarkPointItem(
+                    coord=[peak_time, peak_val],
+                    value=f"峰值: {peak_percentage:.1f}%",
+                    itemstyle_opts=opts.ItemStyleOpts(color="cyan"),
+                    symbol_size=16
+                )
+            )
+            # Final value
+            final_val = eq.iloc[-1]
+            final_percentage = (final_val / start_equity) * 100  # 转换为以初始资金为100%的百分比
+            final_idx = eq.index[-1]
+            final_time = final_idx.strftime('%Y-%m-%d %H:%M:%S')
+            equity_mark_points.append(
+                opts.MarkPointItem(
+                    coord=[final_time, final_val],
+                    value=f"最终: {final_percentage:.1f}%",
+                    itemstyle_opts=opts.ItemStyleOpts(color="blue"),
+                    symbol_size=16
+                )
+            )
+        if equity_mark_points:
+            equity_line.set_series_opts(
+                markpoint_opts=opts.MarkPointOpts(data=equity_mark_points, label_opts=opts.LabelOpts(font_size=10))
+            )
 
-        # 添加买卖点标记 - 参考 backtesting.py 的交易标记
+        # 2) K线图
+        kline = (
+            Kline()
+            .add_xaxis(x_data)
+            .add_yaxis(
+                "K线",
+                ohlc_data,
+                itemstyle_opts=opts.ItemStyleOpts(
+                    color="#ec0000",
+                    color0="#00da3c",
+                    border_color="#ec0000",
+                    border_color0="#00da3c",
+                ),
+            )
+            .set_global_opts(
+                title_opts=opts.TitleOpts(title="价格走势", pos_left="5%", pos_top="21%", title_textstyle_opts=opts.TextStyleOpts(color="#000", font_size=12)),
+                xaxis_opts=opts.AxisOpts(
+                    type_="category",
+                    is_scale=True,
+                    axisline_opts=opts.AxisLineOpts(is_on_zero=False),
+                    splitline_opts=opts.SplitLineOpts(is_show=False),
+                    axislabel_opts=opts.LabelOpts(is_show=False),
+                ),
+                yaxis_opts=opts.AxisOpts(
+                    is_scale=True,
+                    splitarea_opts=opts.SplitAreaOpts(
+                        is_show=True, 
+                        areastyle_opts=opts.AreaStyleOpts(opacity=0.1)
+                    ),
+                    splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(opacity=0.3)),
+                ),
+                legend_opts=opts.LegendOpts(is_show=False),
+                tooltip_opts=opts.TooltipOpts(
+                    trigger="axis",
+                    axis_pointer_type="cross",
+                    background_color="rgba(245, 245, 245, 0.8)",
+                    border_width=1,
+                    border_color="#ccc",
+                    textstyle_opts=opts.TextStyleOpts(color="#000"),
+                    formatter="""
+                    function (params) {
+                        var res = params[0].name + '<br/>';
+                        res += '开盘: ' + params[0].data[1] + '<br/>';
+                        res += '收盘: ' + params[0].data[2] + '<br/>';
+                        res += '最低: ' + params[0].data[3] + '<br/>';
+                        res += '最高: ' + params[0].data[4] + '<br/>';
+                        return res;
+                    }
+                    """
+                ),
+                axispointer_opts=opts.AxisPointerOpts(
+                    is_show=True,
+                    link=[{"xAxisIndex": "all"}],
+                    label=opts.LabelOpts(background_color="#777"),
+                ),
+            )
+        )
+
+        # 添加买卖点标记
         if hasattr(self.strategy, 'trades') and len(self.strategy.trades) > 0:
             trades_df = pd.DataFrame(self.strategy.trades)
             if not trades_df.empty:
-                # 买入点（绿色向上三角形）
-                buy_trades = trades_df[trades_df['side'] == 'buy'].copy()
-                if not buy_trades.empty:
-                    # 使用交易时的索引位置
-                    buy_trades['x'] = buy_trades['i']  # 使用策略记录的索引
-                    buy_trades['y'] = buy_trades['price']
-                    buy_source = ColumnDataSource(buy_trades)
-                    p_ohlc.scatter(x='x', y='y', source=buy_source, 
-                                  marker='triangle', size=12, color="green", alpha=0.8, 
-                                  legend_label="买入")
+                mark_points = []
+                for _, trade in trades_df.iterrows():
+                    trade_time = self.data.index[trade['i']].strftime('%Y-%m-%d %H:%M:%S')
+                    if trade['side'] == 'buy':
+                        mark_points.append(
+                            opts.MarkPointItem(
+                                coord=[trade_time, trade['price']],
+                                value="B",
+                                itemstyle_opts=opts.ItemStyleOpts(color="green"),
+                                symbol='triangle',
+                                symbol_size=12,
+                            )
+                        )
+                    else:
+                        mark_points.append(
+                            opts.MarkPointItem(
+                                coord=[trade_time, trade['price']],
+                                value="S",
+                                itemstyle_opts=opts.ItemStyleOpts(color="red"),
+                                symbol='pin',
+                                symbol_size=12,
+                            )
+                        )
                 
-                # 卖出点（红色向下三角形）  
-                sell_trades = trades_df[trades_df['side'] == 'sell'].copy()
-                if not sell_trades.empty:
-                    # 使用交易时的索引位置
-                    sell_trades['x'] = sell_trades['i']  # 使用策略记录的索引
-                    sell_trades['y'] = sell_trades['price']
-                    sell_source = ColumnDataSource(sell_trades)
-                    p_ohlc.scatter(x='x', y='y', source=sell_source,
-                                  marker='inverted_triangle', size=12, color="red", alpha=0.8,
-                                  legend_label="卖出")
-        
-        # 设置K线图的图例位置
-        p_ohlc.legend.location = "top_left"
-        p_ohlc.legend.click_policy = "hide"
-        
-        # 为K线图添加时间格式化
-        p_ohlc.xaxis.formatter = CustomJSTickFormatter(
-            args=dict(source=source_ohlc),
-            code="""
-            const idx = Math.round(tick);
-            const dts = source.data.datetime;
-            if (idx >= 0 && idx < dts.length) {
-                const dt = new Date(dts[idx]);
-                const mm = String(dt.getMonth()+1).padStart(2,'0');
-                const dd = String(dt.getDate()).padStart(2,'0');
-                const hh = String(dt.getHours()).padStart(2,'0');
-                const mi = String(dt.getMinutes()).padStart(2,'0');
-                return `${mm}/${dd} ${hh}:${mi}`;
-            }
-            return '';
-            """
-        )
+                if mark_points:
+                    kline.set_series_opts(
+                        markpoint_opts=opts.MarkPointOpts(
+                            data=mark_points,
+                            label_opts=opts.LabelOpts(position="top")
+                        )
+                    )
 
-        # 2) 成交量图
-        p_volume = figure(
-            title="成交量",
-            x_axis_type="linear",
-            height=120,
-            width=1200,
-            sizing_mode="stretch_width",
-            x_range=x_range,
-            tools=tools,
-            toolbar_location=None,  # 隐藏单个图表的工具栏
-        )
-        
-        # 为成交量图添加悬停工具
-        volume_hover = HoverTool(
-            tooltips=[
-                ("时间", "@datetime{%F %T}"),
-                ("开盘价", "@Open{0,0.00}"),
-                ("最高价", "@High{0,0.00}"),
-                ("最低价", "@Low{0,0.00}"),
-                ("收盘价", "@Close{0,0.00}"),
-                ("成交量", "@Volume{0,0}")
-            ],
-            formatters={'@datetime': 'datetime'},
-            mode='vline'
-        )
-        p_volume.add_tools(volume_hover)
-        
-        # 添加链接十字星工具
-        p_volume.add_tools(linked_crosshair)
-        
-        w = 0.8
-        inc = df['Close'] > df['Open']
-        dec = ~inc
-        inc_idx = [i for i in range(n_bars) if inc.iloc[i]]
-        dec_idx = [i for i in range(n_bars) if dec.iloc[i]]
-        
-        # 创建涨跌分组的数据源
-        if 'Volume' in df.columns:
-            if inc_idx:
-                inc_source = ColumnDataSource(data={
-                    'x': inc_idx,
-                    'top': df['Volume'].iloc[inc_idx].values,
-                    'datetime': df['datetime'].iloc[inc_idx],
-                    'Open': df['Open'].iloc[inc_idx],
-                    'High': df['High'].iloc[inc_idx],
-                    'Low': df['Low'].iloc[inc_idx],
-                    'Close': df['Close'].iloc[inc_idx],
-                    'Volume': df['Volume'].iloc[inc_idx]
-                })
-                p_volume.vbar(x='x', width=w, top='top', bottom=0, 
-                            color="green", alpha=0.7, source=inc_source)
+        # 3) 成交量图
+        # 准备成交量数据，为每个柱子设置颜色
+        volume_data_with_style = []
+        for i, volume in enumerate(volume_data):
+            open_price, close_price = ohlc_data[i][0], ohlc_data[i][1]
+            if close_price > open_price:  # 涨
+                color = '#ec0000'  # 红色，与K线图一致
+            else:  # 跌
+                color = '#00da3c'  # 绿色，与K线图一致
             
-            if dec_idx:
-                dec_source = ColumnDataSource(data={
-                    'x': dec_idx,
-                    'top': df['Volume'].iloc[dec_idx].values,
-                    'datetime': df['datetime'].iloc[dec_idx],
-                    'Open': df['Open'].iloc[dec_idx],
-                    'High': df['High'].iloc[dec_idx],
-                    'Low': df['Low'].iloc[dec_idx],
-                    'Close': df['Close'].iloc[dec_idx],
-                    'Volume': df['Volume'].iloc[dec_idx]
-                })
-                p_volume.vbar(x='x', width=w, top='top', bottom=0, 
-                            color="red", alpha=0.7, source=dec_source)
-        p_volume.yaxis.formatter = NumeralTickFormatter(format="0 a")
-        p_volume.xaxis.visible = False
-
-        # 3) 资金曲线图
-        p_equity = figure(
-            title="资金曲线",
-            x_axis_type="linear",
-            height=250,
-            width=1200,
-            sizing_mode="stretch_width",
-            x_range=x_range,
-            tools=tools,
-            toolbar_location=None,  # 隐藏单个图表的工具栏
+            volume_data_with_style.append(
+                opts.BarItem(
+                    name=x_data[i],
+                    value=volume,
+                    itemstyle_opts=opts.ItemStyleOpts(color=color)
+                )
+            )
+        
+        bar = (
+            Bar()
+            .add_xaxis(x_data)
+            .add_yaxis(
+                "成交量",
+                volume_data_with_style,
+                xaxis_index=1,
+                yaxis_index=1,
+                label_opts=opts.LabelOpts(is_show=False),
+            )
+            .set_global_opts(
+                title_opts=opts.TitleOpts(title="成交量", pos_left="5%", pos_top="81%", title_textstyle_opts=opts.TextStyleOpts(color="#000", font_size=12)),
+                xaxis_opts=opts.AxisOpts(
+                    type_="category",
+                    grid_index=1,
+                    axislabel_opts=opts.LabelOpts(is_show=False),
+                    axistick_opts=opts.AxisTickOpts(is_show=False),
+                ),
+                yaxis_opts=opts.AxisOpts(
+                    grid_index=1,
+                    split_number=3,
+                    axisline_opts=opts.AxisLineOpts(is_on_zero=False),
+                    axistick_opts=opts.AxisTickOpts(is_show=False),
+                    splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(opacity=0.3)),
+                    axislabel_opts=opts.LabelOpts(is_show=True),
+                    position="left",
+                ),
+                legend_opts=opts.LegendOpts(is_show=False),
+                tooltip_opts=opts.TooltipOpts(
+                    trigger="axis",
+                    axis_pointer_type="cross",
+                    background_color="rgba(245, 245, 245, 0.8)",
+                    border_width=1,
+                    border_color="#ccc",
+                    textstyle_opts=opts.TextStyleOpts(color="#000"),
+                ),
+                axispointer_opts=opts.AxisPointerOpts(
+                    is_show=True,
+                    link=[{"xAxisIndex": "all"}],
+                    label=opts.LabelOpts(background_color="#777"),
+                ),
+            )
         )
         
-        # 为资金曲线创建数据源
-        eq_idx = list(range(len(eq)))
-        # 计算收益率
-        eq_returns = (eq / eq.iloc[0] - 1) * 100  # 转换为百分比
-        equity_source = ColumnDataSource(data={
-            'index': eq_idx,
-            'equity': eq.values,
-            'returns': eq_returns.values,
-            'datetime': eq.index[:len(eq_idx)]
-        })
+        # 布局
+        grid_chart = Grid(init_opts=opts.InitOpts(width="100%",height='800px', theme=ThemeType.LIGHT))
         
-        # 为资金曲线图添加悬停工具
-        equity_hover = HoverTool(
-            tooltips=[
-                ("时间", "@datetime{%F %T}"),
-                ("资金", "@equity{$ 0,0.00}"),
-                ("收益率", "@returns{+0.00}%"),
-                ("索引", "@index")
-            ],
-            formatters={'@datetime': 'datetime'},
-            mode='vline'
+        grid_chart.add(
+            equity_line,
+            grid_opts=opts.GridOpts(pos_left="5%", pos_right="5%", height="10%",pos_top="5%"),
         )
-        p_equity.add_tools(equity_hover)
-        
-        # 添加链接十字星工具
-        p_equity.add_tools(linked_crosshair)
-        
-        # 绘制资金曲线线条
-        p_equity.line('index', 'equity', source=equity_source, color="navy", 
-                     line_width=2, alpha=0.9, legend_label="资金曲线")
-        if len(eq) > 1:
-            # Max Drawdown
-            rolling_max = eq.cummax()
-            drawdown_pct = (eq / rolling_max - 1) * 100
-            max_dd_idx = drawdown_pct.idxmin()
-            max_dd_val = drawdown_pct.min()
-            if max_dd_val < -1:
-                max_dd_pos = eq.index.get_loc(max_dd_idx)
-                p_equity.scatter([max_dd_pos], [eq.iloc[max_dd_pos]], size=8, color="red", alpha=0.8, legend_label=f"最大回撤 {max_dd_val:.1f}%")
-
-            # Peak and Final values
-            peak_val = eq.max()
-            peak_idx = eq.index.get_loc(eq.idxmax())
-            final_val = eq.iloc[-1]
-            final_idx = len(eq) - 1
-
-            start_equity = eq.iloc[0]
-            peak_return_pct = peak_val / start_equity
-            final_return_pct = final_val / start_equity
-            
-            p_equity.scatter([peak_idx], [peak_val], size=8, color="cyan", alpha=1.0, legend_label=f"峰值: {peak_return_pct:.2%}")
-            p_equity.scatter([final_idx], [final_val], size=8, color="blue", alpha=1.0, legend_label=f"最终: {final_return_pct:.2%}")
-
-            # Annualized return calculation
-            start_date = eq.index[0]
-            end_date = eq.index[-1]
-            duration_days = (end_date - start_date).days
-            
-            # Avoid division by zero for very short backtests
-            if duration_days > 0:
-                duration_years = duration_days / 365.25
-                total_return = (eq.iloc[-1] / eq.iloc[0]) - 1
-                annualized_return = (1 + total_return) ** (1 / duration_years) - 1
-                p_equity.title.text = f"资金曲线 (年化收益: {annualized_return:.2%})"
-            else:
-                p_equity.title.text = "资金曲线"
-
-        p_equity.legend.location = "top_left"
-        p_equity.yaxis.formatter = NumeralTickFormatter(format="0,0")
-        
-        p_equity.xaxis.formatter = CustomJSTickFormatter(
-            args=dict(source=source),
-            code="""
-            const idx = Math.round(tick);
-            const dts = source.data.datetime;
-            if (idx >= 0 && idx < dts.length) {
-                const dt = new Date(dts[idx]);
-                const mm = String(dt.getMonth()+1).padStart(2,'0');
-                const dd = String(dt.getDate()).padStart(2,'0');
-                const hh = String(dt.getHours()).padStart(2,'0');
-                const mi = String(dt.getMinutes()).padStart(2,'0');
-                return `${mm}/${dd} ${hh}:${mi}`;
-            }
-            return '';
-            """
+        grid_chart.add(
+            kline,
+            grid_opts=opts.GridOpts(pos_left="5%", pos_right="5%", height="50%",pos_top="20%"),
+        )
+        grid_chart.add(
+            bar,
+            grid_opts=opts.GridOpts(pos_left="5%", pos_right="5%",height="15%",pos_top="80%"),
         )
 
-        # 布局与输出 - 使用 gridplot 而不是 column 以避免显示问题
-        figs = [p_ohlc, p_volume, p_equity]
-        
-        # 配置工具栏选项
-        kwargs = {}
-        kwargs['sizing_mode'] = 'stretch_width'
-        
-        layout = gridplot(
-            figs,
-            ncols=1,
-            toolbar_location='right',
-            toolbar_options=dict(logo=None),
-            merge_tools=True,
-            **kwargs
-        )
         if filename is None:
             filename = "backtest_result.html"
-        output_file(filename, title="回测结果")
+        
+        grid_chart.render(filename)
+
         if show_in_browser:
-            show(layout)
-        else:
-            save(layout)
+            webbrowser.open("file://" + os.path.realpath(filename))
+            
         return filename

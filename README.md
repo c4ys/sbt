@@ -7,9 +7,9 @@
 ```python
 
 # 获取股票历史数据
-rye run sbt data download_history --code_list=002097.SZ --start_date=20240901 --end_date=20250808 --period=5m
+rye run sbt data download_history --code_list=159922.SZ --start_date=20240901 --end_date=20250808 --period=5m
 
 # 运行回测（自研引擎优先）
-rye run sbt backtest run --code_list=002097.SZ --start_date=20240901 --end_date=20250808 --period=30m --strategy=SMACross --cash=10000000
+rye run sbt backtest run --code_list=159922.SZ --start_date=20240901 --end_date=20250808 --period=30m --strategy=SMACross --cash=10000000
 
 ```
