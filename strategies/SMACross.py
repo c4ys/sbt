@@ -24,6 +24,26 @@ class SMACross(StrategyBase):
             # 如果没有 TA-Lib，使用 pandas 的 ewm
             self.ma1 = close.ewm(span=self.n1, adjust=False).mean().values
             self.ma2 = close.ewm(span=self.n2, adjust=False).mean().values
+        
+        # 配置绘图指标
+        self.configure_plot_indicators()
+    
+    def configure_plot_indicators(self):
+        """配置绘图指标"""
+        # 设置绘图主题
+        self.configure_plot(theme='light')
+        
+        # 添加EMA指标到图表
+        self.add_plot_indicator(f'EMA{self.n1}', period=self.n1)
+        self.add_plot_indicator(f'EMA{self.n2}', period=self.n2)
+        
+        # 添加其他常用技术指标
+        self.add_plot_indicator('MACD', fast=12, slow=26, signal=9)
+        self.add_plot_indicator('RSI', period=14)
+        self.add_plot_indicator('BOLL', period=20, std=2)
+        
+        # 可选指标（默认禁用）
+        self.add_plot_indicator('KDJ', n=9, m1=3, m2=3, enabled=False)
     
     def next(self, i: int):
         """策略逻辑"""

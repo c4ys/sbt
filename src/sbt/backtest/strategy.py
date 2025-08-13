@@ -1,12 +1,14 @@
 from __future__ import annotations
-from typing import Any, Dict
+from typing import Any, Dict, List
 import pandas as pd
+
 
 class StrategyBase:
     """最小策略基类：
     - init(self): 初始化指标
     - next(self, i): 在索引 i 上执行交易逻辑
     提供 buy/sell/close 以及访问 data/position/cash/equity。
+    支持配置绘图指标。
     """
 
     def __init__(self, data: pd.DataFrame, cash: float = 10000.0, commission: float = 0.002):
@@ -18,6 +20,11 @@ class StrategyBase:
         self.trades = []  # 交易记录
         self.equity_curve = []  # 权益曲线
         self.context: Dict[str, Any] = {}
+        
+        # 绘图配置
+        self.plot_indicators: List[Dict[str, Any]] = []  # 绘图指标配置列表
+        self.plot_theme: str = 'light'  # 绘图主题
+        
         self.init()
 
     # 用户可覆盖的方法
@@ -26,6 +33,68 @@ class StrategyBase:
 
     def next(self, i: int):
         pass
+    
+    def configure_plot(self, theme: str = 'light'):
+        """
+        配置绘图主题
+        
+        Args:
+            theme: 主题名称 ('light' 或 'dark')
+        """
+        self.plot_theme = theme
+    
+    def add_plot_indicator(self, 
+                          indicator_name: str,
+                          enabled: bool = True,
+                          **params):
+        """
+        添加绘图指标配置
+        
+        Args:
+            indicator_name: 指标名称 (如 'MA20', 'MACD', 'RSI' 等)
+            enabled: 是否启用
+            **params: 指标参数 (如 period=20, fast=12 等)
+        
+        Examples:
+            >>> self.add_plot_indicator('MA20', period=20)
+            >>> self.add_plot_indicator('MACD', fast=12, slow=26, signal=9)
+            >>> self.add_plot_indicator('RSI', period=14)
+            >>> self.add_plot_indicator('BOLL', period=20, std=2)
+        """
+        indicator_config = {
+            'name': indicator_name,
+            'enabled': enabled,
+            'params': params
+        }
+        
+        # 避免重复添加相同指标
+        existing = next((ind for ind in self.plot_indicators if ind['name'] == indicator_name), None)
+        if existing:
+            existing.update(indicator_config)
+        else:
+            self.plot_indicators.append(indicator_config)
+    
+    def remove_plot_indicator(self, indicator_name: str):
+        """
+        移除绘图指标
+        
+        Args:
+            indicator_name: 指标名称
+        """
+        self.plot_indicators = [ind for ind in self.plot_indicators if ind['name'] != indicator_name]
+    
+    def enable_plot_indicator(self, indicator_name: str, enabled: bool = True):
+        """
+        启用/禁用绘图指标
+        
+        Args:
+            indicator_name: 指标名称
+            enabled: 是否启用
+        """
+        for indicator in self.plot_indicators:
+            if indicator['name'] == indicator_name:
+                indicator['enabled'] = enabled
+                break
 
     # 交易动作
     def buy(self, i: int, size: int):
